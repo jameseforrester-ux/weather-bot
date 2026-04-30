@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Weather Prediction Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace `__USER__` and `__APPDIR__` with your actual user / install path,
+# or use the install.sh script which substitutes them automatically.
+User=__USER__
+WorkingDirectory=__APPDIR__
+EnvironmentFile=__APPDIR__/.env
+ExecStart=__APPDIR__/venv/bin/python -u bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:__APPDIR__/bot.log
+StandardError=append:__APPDIR__/bot.log
+
+# Mild hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
