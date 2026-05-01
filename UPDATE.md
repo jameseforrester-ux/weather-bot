@@ -1,35 +1,61 @@
-# Polymarket Update — Drop-in Files
+# Weather Bot — Update v4 (Polymarket overhaul)
 
-This update adds Polymarket prediction-market integration to your bot. **No
-new dependencies, no reinstall, no DB rebuild needed** — the tracking schema
-auto-migrates on startup.
+## What's new
 
-## What's in this zip
+**🎲 35 supported Polymarket cities** (up from 16). Includes Seoul, Shanghai,
+Hong Kong, Tokyo, Singapore, Beijing, Shenzhen, Guangzhou, Wuhan, Qingdao,
+Taipei, Manila, Jakarta, Busan, São Paulo, Buenos Aires, Madrid, Warsaw,
+Moscow, Helsinki, Ankara, Tel Aviv, Cape Town, Wellington, Panama City, and
+all the originals.
 
-| File              | Status      | Purpose                                            |
-| ----------------- | ----------- | -------------------------------------------------- |
-| `polymarket.py`   | **NEW**     | Polymarket Gamma API + bucket parsing + selectors  |
-| `bot.py`          | **CHANGED** | Renders the Polymarket section + alert integration |
-| `tracking.py`     | **CHANGED** | Adds `last_bucket` column (auto-migrates on boot)  |
-| `README.md`       | **CHANGED** | Updated feature list                               |
+**🏟️ Resolution stations** for every city. Polymarket settles each market
+against a specific station (Denver = Buckley Space Force Base / KBKF, Tokyo
+= Haneda / RJTT, Hong Kong = HK Observatory / VHHH, etc.) — we now predict
+**at the exact station** in Polymarket mode and footnote it in every block.
 
-## How to deploy
+**🎯 Two-mode UX** with a new keyboard:
+- 🎲 **Polymarket** — pick a city, focused 3-day forecast at the resolution
+  station, with live odds. *Predictions guaranteed to match the station the
+  market actually settles on.*
+- 🌤️ **Forecast** — search any of ~80,000 airports worldwide. If the airport
+  is within 80 km of a covered city, the Polymarket section appears inline
+  via geographic fallback.
 
-### Step 1 — drop into your local repo & push
+**🌍 City-local "today"** — Tokyo's "today" is computed in JST, not UTC, so
+when you ask about Tokyo at 11 PM ET on May 1, you correctly see the Tokyo
+market for May 2 (which started 13 hours ago there).
 
-In the `weather-bot` folder on your laptop (the one wired up to GitHub):
+**🟩 New bucket visualization** — visual YES bar with NO % complement:
+```
+54–55°F  ✅  Trade
+🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜  30% YES  (70% NO)
+```
 
+**📅 3-day horizon** — both modes now show today + 2 days (was 7).
+
+**Geographic fallback** — KMRY (Monterey) is too far from any covered city,
+so Polymarket section silently hides. Watford, UK auto-maps to London market
+even though it has no airport ICAO. KBKF (Buckley) explicitly maps to Denver
+so it always works regardless of geographic coincidence.
+
+## Files in this zip
+
+| File | Status | Notes |
+|---|---|---|
+| `polymarket.py` | **Rewrite** | 35 cities, resolution stations, geo fallback, timezone awareness |
+| `bot.py` | **Major changes** | New /polymarket flow, new keyboard, new bar viz, 3-day horizon |
+
+## Deploy (same as always)
+
+**Laptop:**
 ```bash
-# Copy the 4 files from this update zip on top of your local repo, overwriting
-# the old bot.py, tracking.py, README.md, and adding the new polymarket.py.
-
-git add polymarket.py bot.py tracking.py README.md
-git commit -m "Add Polymarket integration"
+# Drop the 2 files into your local repo, overwriting old versions, then:
+git add bot.py polymarket.py
+git commit -m "Polymarket: 35 cities, resolution stations, two-mode UX, bar viz"
 git push
 ```
 
-### Step 2 — pull & restart on the VPS (PuTTY)
-
+**VPS (PuTTY):**
 ```bash
 cd ~/weather-bot
 git pull
@@ -37,41 +63,28 @@ sudo systemctl restart weather-bot
 sudo systemctl status weather-bot --no-pager
 ```
 
-That's it. No `pip install`, no recreating the venv, no touching `.env`. The
-tracking DB migrates itself the first time the bot starts up.
+No new dependencies. No DB migration. No `pip install`.
 
-### Step 3 — verify in Telegram
+## Test in Telegram
 
-Watch live logs in PuTTY:
+1. **`/start`** — confirm new keyboard shows 🎲 Polymarket and 🌤️ Forecast
+2. Tap **🎲 Polymarket** — you'll see a 35-city picker, alphabetical
+3. Tap any city — get 3-day forecast at the resolution station with bar viz
+4. **`/forecast KBKF`** (Buckley AFB) — Denver Polymarket section now shows
+   inline (was hidden before because KBKF wasn't in our list)
+5. **`/forecast EDDF`** (Frankfurt) — Polymarket section silently hidden
+   (Frankfurt isn't covered)
+6. **`/polymarket`** is now a slash command too
+
+## Diagnose if anything goes sideways
 
 ```bash
 sudo journalctl -u weather-bot -f
 ```
 
-Then in Telegram:
-1. `/forecast KJFK` → you should see a 🎲 *Polymarket — NYC (F°)* section
-   under today's forecast with the top 3 buckets and a ✅ next to the one
-   the model agrees with. Each bucket has a `[Trade]` deep link.
-2. `/forecast EDDF` (Frankfurt) → no Polymarket section (silently hidden,
-   per your preference) since Frankfurt isn't covered.
-3. Toronto, London, Paris, Tokyo render in °C; US cities + LA/Miami/etc. in °F.
-
-## Supported cities
-
-NYC (KJFK/KLGA/KEWR), Los Angeles, Chicago, Miami, Philadelphia, Austin,
-Denver, Houston, Atlanta, Dallas, Seattle, San Francisco, Toronto (CYYZ),
-London (EGLL etc.), Paris (LFPG), Tokyo (RJTT/RJAA).
-
-Unsupported airports just hide the section — no error, no fallback to a
-different city's market.
-
-## How tracking alerts work now
-
-Tracking still fires on a temperature delta (≥2°F / ≥1°C) as before. **In
-addition**, when the model's predicted bucket changes (e.g. 54-55°F → 56-57°F
-on NYC, or 22°C → 23°C on Toronto), the alert message includes the full
-Polymarket section showing top 3 + hedges + ✅ + [Trade] links — exactly the
-behavior you asked for.
-
-If the bot can't find a Polymarket event for a tracked airport's city, the
-alert just looks like before (no market data appended).
+You'll see lines like:
+- `polymarket: matched highest-temperature-in-tokyo-on-may-2-2026 for tokyo/2026-05-02`
+- `polymarket: tokyo → 11 buckets`
+- `polymarket: geo fallback KCCR → san-francisco` (when geographic lookup kicks in)
+- `polymarket: no event for cape-town/2026-05-01 (tried 7 slugs)` (when city has no
+  market for that day yet — this is normal for less-active cities)

@@ -45,10 +45,13 @@ from config import (
 )
 from polymarket import (
     CityMarket,
-    city_for_airport,
+    SUPPORTED_CITIES,
+    city_local_today,
     get_market_for_city,
     hedges_around,
     match_for_prediction,
+    resolve_city_for_airport,
+    supported_cities_alphabetical,
     top_n_by_yes,
 )
 from tracking import TrackingDB
@@ -74,65 +77,56 @@ tracking_db = TrackingDB(DB_PATH)
 # ─────────────────────────── messages ─────────────────────────────
 WELCOME = (
     "🌤️ *Weather Prediction Bot* 🌤️\n\n"
-    "I provide highly accurate temperature forecasts using a weighted "
-    "*ensemble of the world's best NWP models*:\n"
-    "🇪🇺 ECMWF IFS  ·  🇪🇺 ECMWF AIFS (AI)  ·  🇬🇧 UK Met Office\n"
-    "🇩🇪 DWD ICON  ·  🇺🇸 NOAA GFS  ·  🇯🇵 JMA  ·  🇫🇷 Météo-France  ·  🇨🇦 GEM\n\n"
-    "✨ *What I can do:*\n"
-    "🔍 Search a city → see nearby airports\n"
-    "✈️ Forecast by ICAO / IATA code\n"
-    "🎯 Predictions calibrated to ±2° with a confidence score\n"
-    "📊 Probability for each integer temperature\n"
-    "🎲 Polymarket odds for major cities — top 3 buckets + ✅ on the one we agree with\n"
-    "🔔 Track airports → alert on forecast shifts (≥2°F / ≥1°C)\n"
-    "🌡️ Temperatures in both °F and °C\n\n"
-    "Tap *Menu* (bottom-left) for quick access. "
-    "Or just type a city or airport code!"
+    "Highly accurate temperature forecasts using a *weighted ensemble* of "
+    "8 leading NWP models — ECMWF IFS, ECMWF AIFS (AI), UK Met Office, "
+    "DWD ICON, NOAA GFS, JMA, Météo-France, and Environment Canada GEM.\n\n"
+    "✨ *Two modes:*\n"
+    "🎲 *Polymarket Forecast* — pick a city, get a focused 3-day forecast at "
+    "the exact resolution station Polymarket uses to settle the market, with "
+    "live odds and our top picks. *33 cities.*\n\n"
+    "🌤️ *General Forecast* — search any of ~80,000 airports worldwide. "
+    "Polymarket section appears inline if the airport's near a covered city.\n\n"
+    "🔔 Track airports for ≥2°F / ≥1°C alerts.\n"
+    "🌡️ Temperatures in both °F and °C, always whole numbers.\n\n"
+    "Tap the bottom-left *Menu* or use the keyboard below."
 )
 
 
 HELP = (
-    "*🆘 Help & Methodology*\n\n"
+    "*🆘 Help*\n\n"
     "*Commands*\n"
-    "/start — Welcome message\n"
+    "/polymarket — 🎲 Pick a city → focused 3-day forecast + live odds\n"
+    "/forecast `<code>` — 🌤️ General forecast for any airport\n"
     "/search `<city>` — Find nearby airports\n"
-    "/forecast `<code>` — Forecast for an airport\n"
     "/track `<code>` — Track for change alerts\n"
     "/untrack `<code>` — Stop tracking\n"
     "/list — Your tracked airports\n"
     "/help — This help\n\n"
-    "*Examples*\n"
-    "`/search New York` · `/forecast KJFK` · `/forecast LAX` · `/track EGLL`\n"
-    "_Tip:_ you can also just type a city name or airport code directly.\n\n"
     "*Methodology*\n"
-    "The forecast combines 8 numerical weather prediction models:\n"
-    "• ECMWF IFS (highest weight — global skill leader)\n"
-    "• ECMWF AIFS (ECMWF's AI model — peer to WeatherNext)\n"
-    "• UK Met Office, DWD ICON, NOAA GFS, JMA, Météo-France, GEM\n\n"
-    "We compute a weighted ensemble mean and use the inter-model standard "
-    "deviation as a calibrated uncertainty estimate. A Gaussian over that "
-    "uncertainty gives a probability for each whole-number temperature.\n\n"
-    "🟢 = High confidence (low spread between models — usually within ±2°)\n"
-    "🟡 = Medium confidence\n"
-    "🔴 = Low confidence (large model disagreement)\n\n"
-    "*Polymarket integration*\n"
-    "For supported cities (NYC, LA, Chicago, Miami, Houston, Atlanta, Dallas, "
-    "Denver, Austin, Philadelphia, Seattle, San Francisco, Toronto, London, "
-    "Paris, Tokyo) we show the top 3 daily-high-temperature buckets by YES "
-    "probability. ✅ marks the bucket our model agrees with. Tap *Trade* on "
-    "any bucket to open it on Polymarket. Markets are auto-detected as °F or "
-    "°C per city. Tracking alerts include market data when our model's "
-    "predicted bucket shifts.\n\n"
-    "Current conditions come from the airport's *METAR* weather station "
-    "where available; otherwise from Open-Meteo's nearest grid cell."
+    "Weighted ensemble of 8 NWP models. ECMWF IFS gets the highest weight. "
+    "Confidence is derived from inter-model standard deviation — when the "
+    "world's best models agree, the forecast is reliable.\n"
+    "🟢 high · 🟡 medium · 🔴 low\n\n"
+    "*Polymarket modes*\n"
+    "• 🎲 *Polymarket Forecast* picks a city, predicts at Polymarket's exact "
+    "resolution station, fetches live markets for today + 2 days, and shows "
+    "3 buckets centered on our prediction with visual YES bars.\n"
+    "• 🌤️ *General Forecast* uses the airport's own coordinates. If the "
+    "airport happens to be within 80 km of a Polymarket city, the same "
+    "Polymarket section appears inline. Otherwise it's just weather.\n\n"
+    "*Bucket display*\n"
+    "🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜  30% YES  _(70% NO)_\n"
+    "✅ marks the bucket our model lands in.\n"
+    "⚠️ appears when our pick disagrees with the crowd's leader."
 )
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🔍 Search City"), KeyboardButton("✈️ Forecast")],
-            [KeyboardButton("📋 My Tracked"), KeyboardButton("❓ Help")],
+            [KeyboardButton("🎲 Polymarket"), KeyboardButton("🌤️ Forecast")],
+            [KeyboardButton("🔍 Search City"), KeyboardButton("📋 My Tracked")],
+            [KeyboardButton("❓ Help")],
         ],
         resize_keyboard=True,
     )
@@ -285,6 +279,10 @@ async def do_city_search(update: Update, city: str) -> None:
 
 
 async def send_forecast(update: Update, code: str) -> None:
+    """General-mode forecast for any airport. Inline Polymarket section
+    appears when the airport maps (directly or geographically) to a covered
+    city.
+    """
     code = code.upper().strip()
     airport = airports_db.lookup(code)
     if not airport:
@@ -301,8 +299,9 @@ async def send_forecast(update: Update, code: str) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
 
+    # 3-day forecast (today + 2) for both general and Polymarket modes.
     forecasts, current = await asyncio.gather(
-        fetch_ensemble_forecast(airport.lat, airport.lon, days=7),
+        fetch_ensemble_forecast(airport.lat, airport.lon, days=3),
         fetch_current_observation(airport.icao, airport.lat, airport.lon),
         return_exceptions=True,
     )
@@ -316,21 +315,26 @@ async def send_forecast(update: Update, code: str) -> None:
         await msg.edit_text("❌ No forecast data available for this location.")
         return
 
-    # Polymarket lookup — only for cities that have daily temp markets.
-    # We try every forecast date in parallel and silently ignore any that
-    # don't have a market (per user preference).
+    # Two-tier city resolution: explicit map first, geographic fallback second.
     markets_by_date: dict = {}
-    city_info = city_for_airport(airport.icao)
-    if city_info:
-        city_key, market_unit = city_info
+    resolved = resolve_city_for_airport(airport.icao, airport.lat, airport.lon)
+    if resolved:
+        city_key, _market_unit, source = resolved
+        # Use the CITY's local "today" for date alignment so cross-timezone
+        # users hit the right market. The forecast dates are already in the
+        # airport's local TZ from Open-Meteo, so for explicit mappings (same
+        # metro) they coincide. For the geo case they should also coincide.
+        local_today = city_local_today(city_key)
+        # Try each forecast date; Polymarket may publish 1–7 days ahead.
         results = await asyncio.gather(
-            *(get_market_for_city(city_key, fc.date, market_unit)
-              for fc in forecasts),
+            *(get_market_for_city(city_key, fc.date) for fc in forecasts),
             return_exceptions=True,
         )
         for fc, m in zip(forecasts, results):
             if isinstance(m, CityMarket):
                 markets_by_date[fc.date] = m
+        if source == "geo" and markets_by_date:
+            log.info("polymarket: geo fallback %s → %s", airport.icao, city_key)
 
     text = format_forecast(airport, forecasts, current, markets_by_date)
     keyboard = [
@@ -375,6 +379,136 @@ async def show_models_breakdown(update: Update, code: str) -> None:
         )
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ─────────────────────────── Polymarket dedicated mode ────────────────────
+async def cmd_polymarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the city picker for the dedicated Polymarket forecast flow."""
+    await show_polymarket_city_menu(update)
+
+
+async def show_polymarket_city_menu(update: Update) -> None:
+    rows = []
+    cities = supported_cities_alphabetical()
+    # Two columns of buttons for compactness.
+    for i in range(0, len(cities), 2):
+        row = []
+        for ck, cfg in cities[i:i + 2]:
+            row.append(InlineKeyboardButton(
+                f"📍 {cfg.display}", callback_data=f"pm:{ck}"
+            ))
+        rows.append(row)
+
+    text = (
+        "🎲 *Polymarket Forecast*\n\n"
+        f"Pick a city. I'll forecast at the *exact resolution station* "
+        f"Polymarket uses to settle the market, then show our top picks "
+        f"with live odds.\n\n"
+        f"_{len(cities)} cities supported · today + 2 days, in each city's "
+        f"local time_"
+    )
+    await update.effective_message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def send_polymarket_forecast(update: Update, city_key: str) -> None:
+    """Polymarket-mode forecast: predict AT the resolution station, fetch
+    markets for the city's local today + 2, render with bar visualization.
+    """
+    cfg = SUPPORTED_CITIES.get(city_key)
+    if not cfg:
+        await update.effective_message.reply_text("❌ Unknown city.")
+        return
+
+    msg = await update.effective_message.reply_text(
+        f"⏳ Building Polymarket forecast for *{cfg.display}*…\n"
+        f"_predicting at {_md_safe(cfg.resolves_at_name)} ({cfg.resolves_at_icao})_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    # Predict at the resolution station — this is the whole point of this mode.
+    forecasts, current = await asyncio.gather(
+        fetch_ensemble_forecast(cfg.resolves_at_lat, cfg.resolves_at_lon, days=3),
+        fetch_current_observation(cfg.resolves_at_icao,
+                                   cfg.resolves_at_lat, cfg.resolves_at_lon),
+        return_exceptions=True,
+    )
+    if isinstance(forecasts, Exception):
+        log.exception("polymarket forecast failed", exc_info=forecasts)
+        await msg.edit_text(f"❌ Forecast failed: {forecasts}")
+        return
+    if isinstance(current, Exception):
+        current = None
+    if not forecasts:
+        await msg.edit_text("❌ No forecast data.")
+        return
+
+    # Forecast dates from Open-Meteo are in the airport's local timezone, which
+    # for the resolution station equals the city's timezone — exactly what we
+    # want for matching to Polymarket events.
+    local_today = city_local_today(city_key)
+
+    # Fetch markets for each of the 3 forecast dates in parallel.
+    market_results = await asyncio.gather(
+        *(get_market_for_city(city_key, fc.date) for fc in forecasts),
+        return_exceptions=True,
+    )
+    markets_by_date = {}
+    for fc, m in zip(forecasts, market_results):
+        if isinstance(m, CityMarket):
+            markets_by_date[fc.date] = m
+
+    # Build a focused render: header → per-day temp + Polymarket section.
+    lines = [
+        f"🎲 *Polymarket Forecast — {cfg.display}*",
+        f"🏟️ Resolves at: *{_md_safe(cfg.resolves_at_name)}* "
+        f"({cfg.resolves_at_icao})",
+        f"🕐 Local date: {local_today.strftime('%A, %b %d')}"
+        if local_today else "",
+    ]
+    if current and current.temp_c is not None:
+        c = int(round(current.temp_c))
+        f_v = int(round(current.temp_f))
+        lines.append(f"📡 Current ({current.source}): *{f_v}°F / {c}°C*")
+    lines.append("─" * 26)
+
+    for i, fc in enumerate(forecasts):
+        if i == 0:
+            day_label = "📅 *Today*"
+        elif i == 1:
+            day_label = "📅 *Tomorrow*"
+        else:
+            day_label = f"📅 *{fc.date.strftime('%A')}*"
+        flag = _flag(fc)
+        lines.append(f"\n{day_label} _{fc.date.strftime('%b %d')}_")
+        lines.append(
+            f"🌡️ Max: *{fc.predicted_max_f}°F / {fc.predicted_max_c}°C*  {flag}"
+        )
+        lines.append(
+            f"🎯 Confidence: *{int(fc.confidence*100)}%* "
+            f"({fc.confidence_level}) · σ {fc.std_c:.1f}°C"
+        )
+        market = markets_by_date.get(fc.date)
+        if market:
+            lines.append(_format_polymarket_block(market, fc))
+        else:
+            lines.append("_No Polymarket event for this day yet._")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"pm:{city_key}"),
+            InlineKeyboardButton("🏙️ Cities", callback_data="pm_menu"),
+        ]
+    ]
+    await msg.edit_text(
+        "\n".join(l for l in lines if l),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
     )
 
 
@@ -428,48 +562,62 @@ def _md_link(label: str, url: str) -> str:
     return f"[{safe}]({url})"
 
 
-def _format_polymarket_block(market, fc: DayForecast) -> str:
-    """Render the Polymarket section for a given day's forecast.
+def _yes_bar(prob: float, width: int = 10) -> str:
+    """Visual progress bar: green squares for YES, white squares for the rest.
+    Always shows at least 1 filled if prob > ~0.05, and never shows full bar
+    unless prob is essentially 1 (so 95% shows 9/10, not 10/10).
+    """
+    if not (0 <= prob <= 1):
+        prob = max(0.0, min(1.0, prob))
+    filled = int(round(prob * width))
+    if prob > 0.05 and filled == 0:
+        filled = 1
+    if prob < 0.999 and filled >= width:
+        filled = width - 1
+    return "🟩" * filled + "⬜" * (width - filled)
 
-    - Crowd's top 3 buckets by YES probability.
-    - ✅ next to the bucket(s) our model agrees with.
-    - A 'Hedge picks' band (model pick ±1) if the model's bucket isn't in the
-      crowd top 3 — gives the user 3 likely positions to play in case the
-      forecast shifts.
+
+def _format_polymarket_block(market, fc: DayForecast) -> str:
+    """Polymarket section: 3 model-centered picks with visual YES bars,
+    NO % complement text, ✅ on the matched bucket, footer with resolution
+    station info, and a disclaimer when the model disagrees with the crowd.
     """
     pred = fc.predicted_max_c if market.unit == "C" else fc.predicted_max_f
     matched = match_for_prediction(market, pred)
     matched_slug = matched.market_slug if matched else None
 
-    top3 = top_n_by_yes(market, n=3)
-
     out = []
+    out.append(f"\n🎲 *Polymarket* — {market.city_display} (°{market.unit})")
     out.append(
-        f"\n   🎲 *Polymarket* — {market.city_display} "
-        f"({market.unit}°)"
+        f"🏟️ _Resolves at: {_md_safe(market.resolves_at_name)} "
+        f"({market.resolves_at_icao})_"
     )
-    out.append("   _Crowd's top 3 by YES:_")
-    for b in top3:
+
+    picks = hedges_around(market, pred, target_count=3)
+    if not picks:
+        picks = top_n_by_yes(market, n=3)
+
+    out.append("")  # blank line
+    for b in sorted(picks, key=lambda x: x.value):
         check = " ✅" if matched_slug and b.market_slug == matched_slug else ""
-        pct = int(round(b.yes_prob * 100))
+        yes_pct = int(round(b.yes_prob * 100))
+        no_pct = 100 - yes_pct
+        bar = _yes_bar(b.yes_prob)
+        # Bucket label + check + trade link on one line; bar on the next.
         out.append(
-            f"   • {b.label}: *{pct}%* YES{check}  "
-            f"{_md_link('Trade', b.trade_url)}"
+            f"*{b.label}*{check}  {_md_link('Trade', b.trade_url)}"
+        )
+        out.append(f"{bar}  *{yes_pct}%* YES  _({no_pct}% NO)_")
+        out.append("")
+
+    crowd_top3_slugs = {b.market_slug for b in top_n_by_yes(market, n=3)}
+    if matched_slug and matched_slug not in crowd_top3_slugs:
+        out.append(
+            "⚠️ _Our pick differs from the crowd — verify on the live market "
+            "before trading._"
         )
 
-    # Show hedge band only when the model's pick isn't already in the top 3,
-    # so we don't duplicate buttons.
-    if matched_slug and not any(b.market_slug == matched_slug for b in top3):
-        hedges = hedges_around(market, pred, k=1)
-        if hedges:
-            out.append("   _🎯 Hedge picks (around our prediction):_")
-            for b in sorted(hedges, key=lambda x: x.value):
-                check = " ✅" if b.market_slug == matched_slug else ""
-                pct = int(round(b.yes_prob * 100))
-                out.append(
-                    f"   • {b.label}: *{pct}%* YES{check}  "
-                    f"{_md_link('Trade', b.trade_url)}"
-                )
+    return "\n".join(out)
 
     return "\n".join(out)
 
@@ -562,6 +710,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
     elif data.startswith("models:"):
         await show_models_breakdown(update, data[7:])
+    elif data == "pm_menu":
+        await show_polymarket_city_menu(update)
+    elif data.startswith("pm:"):
+        await send_polymarket_forecast(update, data[3:])
 
 
 _AIRPORT_CODE_RE = re.compile(r"^[A-Za-z]{3,4}$")
@@ -573,15 +725,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Reply-keyboard buttons
-    if txt == "🔍 Search City":
+    if txt == "🎲 Polymarket":
+        await show_polymarket_city_menu(update)
+        return
+    if txt == "🌤️ Forecast":
         await update.effective_message.reply_text(
-            "🔍 Send me a city name — just type it.\n\nExample: *London*",
+            "🌤️ Send me an airport code — just type it.\n\nExample: *KJFK* or *LAX*",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-    if txt == "✈️ Forecast":
+    if txt == "🔍 Search City":
         await update.effective_message.reply_text(
-            "✈️ Send me an airport code — just type it.\n\nExample: *KJFK*  or  *LAX*",
+            "🔍 Send me a city name — just type it.\n\nExample: *London*",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -622,14 +777,15 @@ async def tracking_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         new_c = today.predicted_max_c
         new_f = today.predicted_max_f
 
-        # Look up Polymarket for this airport's city, today (if any).
+        # Look up Polymarket for this airport's city (explicit map or
+        # geographic fallback), today (if any).
         market = None
         new_bucket_label = None
-        city_info = city_for_airport(airport.icao)
-        if city_info:
-            city_key, market_unit = city_info
+        resolved = resolve_city_for_airport(airport.icao, airport.lat, airport.lon)
+        if resolved:
+            city_key, _market_unit, _src = resolved
             try:
-                market = await get_market_for_city(city_key, today.date, market_unit)
+                market = await get_market_for_city(city_key, today.date)
             except Exception:
                 log.exception("polymarket fetch failed for %s", code)
                 market = None
@@ -703,8 +859,9 @@ async def tracking_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(app: Application) -> None:
     commands = [
         BotCommand("start", "🌟 Welcome & menu"),
+        BotCommand("polymarket", "🎲 Polymarket forecast (33 cities)"),
+        BotCommand("forecast", "🌤️ Forecast by airport code"),
         BotCommand("search", "🔍 Search city for airports"),
-        BotCommand("forecast", "✈️ Forecast by airport code"),
         BotCommand("track", "🔔 Track for change alerts"),
         BotCommand("untrack", "🔕 Stop tracking"),
         BotCommand("list", "📋 Your tracked airports"),
@@ -730,6 +887,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("polymarket", cmd_polymarket))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("forecast", cmd_forecast))
     app.add_handler(CommandHandler("track", cmd_track))
