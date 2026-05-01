@@ -16,7 +16,12 @@ per integer temperature, METAR-station current conditions, and tracking alerts.
 - 🎯 **Confidence score** on every prediction (high-confidence flagged 🟢)
 - 📊 **Probability per integer temperature** (e.g. `72°F: 45% · 71°F: 25%`)
 - 📡 **Live METAR observations** from the airport's actual weather station
-- 🔔 **Tracking** — alerts you if the predicted max changes by ≥2°F or ≥1°C
+- 🎲 **Polymarket integration** — for supported cities, shows the top 3 daily
+  high-temperature buckets by YES probability with a ✅ next to the one our
+  model agrees with, plus a hedge band around our prediction with [Trade]
+  deep-links into Polymarket. Auto-detects °F vs °C per market.
+- 🔔 **Tracking** — alerts you if the predicted max changes by ≥2°F or ≥1°C;
+  alert includes Polymarket data when the model's bucket shifts.
 - 🌡️ Temperatures shown in both **°F and °C, always whole numbers**
 - 📱 **Bottom-left commands menu** + persistent reply keyboard for fast access
 

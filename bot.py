@@ -43,6 +43,14 @@ from config import (
     LOG_LEVEL,
     TRACKING_INTERVAL_MINUTES,
 )
+from polymarket import (
+    CityMarket,
+    city_for_airport,
+    get_market_for_city,
+    hedges_around,
+    match_for_prediction,
+    top_n_by_yes,
+)
 from tracking import TrackingDB
 from weather import (
     DayForecast,
@@ -75,7 +83,8 @@ WELCOME = (
     "✈️ Forecast by ICAO / IATA code\n"
     "🎯 Predictions calibrated to ±2° with a confidence score\n"
     "📊 Probability for each integer temperature\n"
-    "🔔 Track airports → alert if forecast shifts ≥2°F (≥1°C)\n"
+    "🎲 Polymarket odds for major cities — top 3 buckets + ✅ on the one we agree with\n"
+    "🔔 Track airports → alert on forecast shifts (≥2°F / ≥1°C)\n"
     "🌡️ Temperatures in both °F and °C\n\n"
     "Tap *Menu* (bottom-left) for quick access. "
     "Or just type a city or airport code!"
@@ -106,6 +115,14 @@ HELP = (
     "🟢 = High confidence (low spread between models — usually within ±2°)\n"
     "🟡 = Medium confidence\n"
     "🔴 = Low confidence (large model disagreement)\n\n"
+    "*Polymarket integration*\n"
+    "For supported cities (NYC, LA, Chicago, Miami, Houston, Atlanta, Dallas, "
+    "Denver, Austin, Philadelphia, Seattle, San Francisco, Toronto, London, "
+    "Paris, Tokyo) we show the top 3 daily-high-temperature buckets by YES "
+    "probability. ✅ marks the bucket our model agrees with. Tap *Trade* on "
+    "any bucket to open it on Polymarket. Markets are auto-detected as °F or "
+    "°C per city. Tracking alerts include market data when our model's "
+    "predicted bucket shifts.\n\n"
     "Current conditions come from the airport's *METAR* weather station "
     "where available; otherwise from Open-Meteo's nearest grid cell."
 )
@@ -299,7 +316,23 @@ async def send_forecast(update: Update, code: str) -> None:
         await msg.edit_text("❌ No forecast data available for this location.")
         return
 
-    text = format_forecast(airport, forecasts, current)
+    # Polymarket lookup — only for cities that have daily temp markets.
+    # We try every forecast date in parallel and silently ignore any that
+    # don't have a market (per user preference).
+    markets_by_date: dict = {}
+    city_info = city_for_airport(airport.icao)
+    if city_info:
+        city_key, market_unit = city_info
+        results = await asyncio.gather(
+            *(get_market_for_city(city_key, fc.date, market_unit)
+              for fc in forecasts),
+            return_exceptions=True,
+        )
+        for fc, m in zip(forecasts, results):
+            if isinstance(m, CityMarket):
+                markets_by_date[fc.date] = m
+
+    text = format_forecast(airport, forecasts, current, markets_by_date)
     keyboard = [
         [
             InlineKeyboardButton("🔔 Track", callback_data=f"track:{airport.icao}"),
@@ -311,6 +344,7 @@ async def send_forecast(update: Update, code: str) -> None:
         text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
     )
 
 
@@ -388,7 +422,60 @@ def _flag(f: DayForecast) -> str:
     return "🔴"
 
 
-def format_forecast(airport, forecasts, current) -> str:
+def _md_link(label: str, url: str) -> str:
+    """Inline markdown link, with [] inside the label sanitized."""
+    safe = label.replace("[", "(").replace("]", ")")
+    return f"[{safe}]({url})"
+
+
+def _format_polymarket_block(market, fc: DayForecast) -> str:
+    """Render the Polymarket section for a given day's forecast.
+
+    - Crowd's top 3 buckets by YES probability.
+    - ✅ next to the bucket(s) our model agrees with.
+    - A 'Hedge picks' band (model pick ±1) if the model's bucket isn't in the
+      crowd top 3 — gives the user 3 likely positions to play in case the
+      forecast shifts.
+    """
+    pred = fc.predicted_max_c if market.unit == "C" else fc.predicted_max_f
+    matched = match_for_prediction(market, pred)
+    matched_slug = matched.market_slug if matched else None
+
+    top3 = top_n_by_yes(market, n=3)
+
+    out = []
+    out.append(
+        f"\n   🎲 *Polymarket* — {market.city_display} "
+        f"({market.unit}°)"
+    )
+    out.append("   _Crowd's top 3 by YES:_")
+    for b in top3:
+        check = " ✅" if matched_slug and b.market_slug == matched_slug else ""
+        pct = int(round(b.yes_prob * 100))
+        out.append(
+            f"   • {b.label}: *{pct}%* YES{check}  "
+            f"{_md_link('Trade', b.trade_url)}"
+        )
+
+    # Show hedge band only when the model's pick isn't already in the top 3,
+    # so we don't duplicate buttons.
+    if matched_slug and not any(b.market_slug == matched_slug for b in top3):
+        hedges = hedges_around(market, pred, k=1)
+        if hedges:
+            out.append("   _🎯 Hedge picks (around our prediction):_")
+            for b in sorted(hedges, key=lambda x: x.value):
+                check = " ✅" if b.market_slug == matched_slug else ""
+                pct = int(round(b.yes_prob * 100))
+                out.append(
+                    f"   • {b.label}: *{pct}%* YES{check}  "
+                    f"{_md_link('Trade', b.trade_url)}"
+                )
+
+    return "\n".join(out)
+
+
+def format_forecast(airport, forecasts, current, markets_by_date=None) -> str:
+    markets_by_date = markets_by_date or {}
     parts = []
     code_str = f"*{airport.icao}*"
     if airport.iata:
@@ -445,6 +532,11 @@ def format_forecast(airport, forecasts, current) -> str:
         top = sorted(fc.probability_f.items(), key=lambda x: -x[1])[:3]
         prob_str = " · ".join(f"{t}°F: *{int(p * 100)}%*" for t, p in top)
         parts.append(f"   📊 {prob_str}")
+
+        # ───── Polymarket section (only when a market exists for this day) ─────
+        market = markets_by_date.get(fc.date)
+        if market:
+            parts.append(_format_polymarket_block(market, fc))
 
     parts.append("\n" + "─" * 26)
     parts.append("🟢 high confidence  ·  🟡 medium  ·  🔴 low")
@@ -515,7 +607,7 @@ async def tracking_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         return
     log.info("tracking_job: checking %d entries", len(rows))
-    for row_id, user_id, chat_id, code, last_c, last_f in rows:
+    for row_id, user_id, chat_id, code, last_c, last_f, last_bucket in rows:
         airport = airports_db.lookup(code)
         if not airport:
             continue
@@ -530,30 +622,81 @@ async def tracking_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         new_c = today.predicted_max_c
         new_f = today.predicted_max_f
 
+        # Look up Polymarket for this airport's city, today (if any).
+        market = None
+        new_bucket_label = None
+        city_info = city_for_airport(airport.icao)
+        if city_info:
+            city_key, market_unit = city_info
+            try:
+                market = await get_market_for_city(city_key, today.date, market_unit)
+            except Exception:
+                log.exception("polymarket fetch failed for %s", code)
+                market = None
+            if market:
+                pred = today.predicted_max_c if market.unit == "C" else today.predicted_max_f
+                matched = match_for_prediction(market, pred)
+                if matched:
+                    new_bucket_label = matched.label
+
+        # Decide whether to alert.
+        # Per user spec: include Polymarket data in the alert only when our
+        # model's bucket changes. Temperature-threshold alerts still fire as
+        # before, but without the market block.
+        bucket_changed = (
+            new_bucket_label is not None
+            and last_bucket is not None
+            and new_bucket_label != last_bucket
+        )
+        temp_changed = False
         if last_c is not None and last_f is not None:
             d_c = abs(new_c - last_c)
             d_f = abs(new_f - last_f)
             if d_c >= ALERT_THRESHOLD_C or d_f >= ALERT_THRESHOLD_F:
-                arrow = "📈" if new_c > last_c else "📉"
-                flag = _flag(today)
-                msg = (
-                    f"🔔 *Forecast Alert: {code}*\n"
-                    f"📍 {_md_safe(airport.name)}\n\n"
-                    f"{arrow} Today's predicted max changed:\n"
-                    f"   Old: {int(round(last_f))}°F / {int(round(last_c))}°C\n"
-                    f"   New: *{new_f}°F / {new_c}°C* {flag}\n"
-                    f"   Δ: {int(new_f - last_f):+d}°F / {int(new_c - last_c):+d}°C\n\n"
-                    f"Confidence: *{int(today.confidence * 100)}%* "
-                    f"({today.confidence_level})"
-                )
-                try:
-                    await ctx.bot.send_message(
-                        chat_id, msg, parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception:
-                    log.exception("failed to send alert to chat %s", chat_id)
+                temp_changed = True
 
-        tracking_db.update_last(row_id, new_c, new_f)
+        if bucket_changed or temp_changed:
+            arrow = "📈" if (last_c is not None and new_c > last_c) else "📉"
+            flag = _flag(today)
+            lines = [
+                f"🔔 *Forecast Alert: {code}*",
+                f"📍 {_md_safe(airport.name)}",
+                "",
+                f"{arrow} Today's predicted max changed:",
+                f"   Old: {int(round(last_f))}°F / {int(round(last_c))}°C"
+                if last_f is not None else "   Old: —",
+                f"   New: *{new_f}°F / {new_c}°C* {flag}",
+            ]
+            if last_f is not None:
+                lines.append(
+                    f"   Δ: {int(new_f - last_f):+d}°F / {int(new_c - last_c):+d}°C"
+                )
+            lines.append("")
+            lines.append(
+                f"Confidence: *{int(today.confidence * 100)}%* "
+                f"({today.confidence_level})"
+            )
+
+            # Polymarket block — included only when the bucket changed.
+            if bucket_changed and market:
+                lines.append("")
+                lines.append(
+                    f"🪣 Polymarket bucket shifted: "
+                    f"*{last_bucket}* → *{new_bucket_label}*"
+                )
+                lines.append(_format_polymarket_block(market, today).lstrip("\n"))
+
+            try:
+                await ctx.bot.send_message(
+                    chat_id,
+                    "\n".join(lines),
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                log.exception("failed to send alert to chat %s", chat_id)
+
+        tracking_db.update_last(row_id, new_c, new_f, new_bucket_label)
 
 
 # ─────────────────────────── lifecycle ────────────────────────────
