@@ -630,3 +630,104 @@ def hedges_around(market: CityMarket, predicted: int,
 def supported_cities_alphabetical() -> List[Tuple[str, CityConfig]]:
     """Return [(city_key, config)] sorted by display name."""
     return sorted(SUPPORTED_CITIES.items(), key=lambda kv: kv[1].display)
+
+
+# ─────────────────────────── EV & opportunity scoring ─────────────────────
+import math as _math
+
+
+def _gauss_cdf(z: float) -> float:
+    return 0.5 * (1.0 + _math.erf(z / _math.sqrt(2)))
+
+
+def model_yes_prob_for_bucket(
+    bucket: TempBucket, predicted: float, sigma_unit: float
+) -> float:
+    """Our model's probability that the actual high will land inside this
+    bucket — i.e. our YES probability. Computed as the integral of a Gaussian
+    centered on the model's predicted temperature with std `sigma_unit` (in
+    the same unit as the bucket) over the bucket's interval.
+    """
+    sigma = max(0.1, sigma_unit)
+    if bucket.kind == "exact":
+        lo, hi = bucket.value - 0.5, bucket.value + 0.5
+    elif bucket.kind == "range":
+        lo, hi = bucket.value - 0.5, bucket.hi + 0.5
+    elif bucket.kind == "gte":
+        lo, hi = bucket.value - 0.5, predicted + 50  # tail
+    elif bucket.kind == "lte":
+        lo, hi = predicted - 50, bucket.value + 0.5  # tail
+    else:
+        return 0.0
+    z_lo = (lo - predicted) / sigma
+    z_hi = (hi - predicted) / sigma
+    p = _gauss_cdf(z_hi) - _gauss_cdf(z_lo)
+    return max(0.0, min(1.0, p))
+
+
+@dataclass
+class EVPick:
+    """Expected-value-evaluated bucket. EV is per $1 staked on YES at the
+    market's current YES price: EV = model_p / yes_price - 1. Positive EV
+    means the model thinks the bucket is mispriced cheap.
+    """
+    bucket: TempBucket
+    model_p: float        # our model's YES probability for this bucket
+    market_p: float       # market's YES probability (last trade)
+    edge_pp: float        # (model_p - market_p) * 100, in percentage points
+    ev_per_dollar: float  # model_p / market_p - 1   (signed, can be negative)
+    score: float          # combined score for ranking
+
+
+def rank_buckets_by_ev(
+    market: CityMarket, predicted: float, sigma_unit: float
+) -> List[EVPick]:
+    """Return all buckets ranked by EV. Best (highest EV) first. We skip
+    buckets priced under 2¢ (illiquid noise) and over 98¢ (no upside).
+    """
+    out: List[EVPick] = []
+    for b in market.buckets:
+        if not (0.02 <= b.yes_prob <= 0.98):
+            continue
+        mp = model_yes_prob_for_bucket(b, predicted, sigma_unit)
+        if mp < 0.01:
+            continue
+        ev = (mp / b.yes_prob) - 1.0
+        edge_pp = (mp - b.yes_prob) * 100.0
+        # Combined score: edge in pp scaled by our model_p (we want both a
+        # mispricing and decent absolute confidence in the bucket).
+        score = edge_pp * mp
+        out.append(EVPick(
+            bucket=b, model_p=mp, market_p=b.yes_prob,
+            edge_pp=edge_pp, ev_per_dollar=ev, score=score,
+        ))
+    out.sort(key=lambda p: -p.score)
+    return out
+
+
+@dataclass
+class Opportunity:
+    """A high-confidence trading opportunity for a (city, day) combo."""
+    city_key: str
+    city_display: str
+    target_date: date
+    is_today: bool
+    confidence: float          # model's confidence for the day (0..1)
+    predicted_unit: int        # rounded prediction in market's unit (°F or °C)
+    unit: str                  # 'C' or 'F'
+    matched_bucket: TempBucket
+    matched_yes: float         # market's YES on the matched bucket
+    best_pick: EVPick          # top EV pick (could be matched bucket or another)
+    hedge_pick: Optional[EVPick]
+    market: CityMarket
+    score: float               # combined ranking score across all opportunities
+
+
+def score_opportunity(opp_confidence: float, best_ev_score: float) -> float:
+    """Combined score for ranking opportunities. We multiply confidence by
+    the best EV's score (which is already edge*model_p) so we surface
+    high-confidence days where the market also has decent mispricing.
+    """
+    return opp_confidence * max(0.0, best_ev_score)
+
+
