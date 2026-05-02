@@ -610,16 +610,42 @@ async def find_opportunities_two_tier() -> Tuple[List[Opportunity], List[Opportu
 
 
 def _format_opportunity_summary(opp: Opportunity, idx: int) -> str:
-    """One-row summary in the top-5 list."""
+    """Two-line summary. First line: city, day, model confidence + matched-
+    bucket market price (the number that the filter actually qualifies on).
+    Second line: the best EV pick with its own bar + edge.
+
+    This avoids the confusion where the matched bucket has e.g. 33% market
+    YES (passing the honorable 30% filter) but the *best EV pick* shown is
+    a different bucket with a different price.
+    """
     day = "Today" if opp.is_today else "Tomorrow"
-    bar = _yes_bar(opp.best_pick.market_p, width=8)
-    edge = opp.best_pick.edge_pp
+    matched_pct = int(round(opp.matched_yes * 100))
+    matched_bar = _yes_bar(opp.matched_yes, width=8)
+    best = opp.best_pick
+    best_pct = int(round(best.market_p * 100))
+    best_bar = _yes_bar(best.market_p, width=8)
+    edge = best.edge_pp
     edge_str = f"{edge:+.0f}pp" if abs(edge) >= 1 else "≈0pp"
-    return (
-        f"*{idx}. {opp.city_display}* · _{day}_  🎯 *{int(opp.confidence*100)}%*\n"
-        f"   {opp.predicted_unit}°{opp.unit} → *{opp.best_pick.bucket.label}*  "
-        f"`{bar}` {int(round(opp.best_pick.market_p*100))}%  edge {edge_str}"
+    same_bucket = best.bucket.market_slug == opp.matched_bucket.market_slug
+
+    line1 = (
+        f"*{idx}. {opp.city_display}* · _{day}_  "
+        f"🎯 *{int(opp.confidence*100)}%* model"
     )
+    # Model-matched bucket — the one that determines tier qualification
+    line2 = (
+        f"   🎯 {opp.predicted_unit}°{opp.unit} → *{opp.matched_bucket.label}*  "
+        f"`{matched_bar}` {matched_pct}% market"
+    )
+    # Best EV pick — what we actually recommend
+    if same_bucket:
+        line3 = f"   💰 Best EV: same bucket · edge {edge_str}"
+    else:
+        line3 = (
+            f"   💰 Best EV: *{best.bucket.label}*  "
+            f"`{best_bar}` {best_pct}% · edge {edge_str}"
+        )
+    return f"{line1}\n{line2}\n{line3}"
 
 
 async def cmd_opportunities(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -704,17 +730,54 @@ async def show_opportunity_detail(
     update: Update, city_key: str, target_date_iso: str
 ) -> None:
     """Detail view for one opportunity: model context + top-3 EV picks
-    with smart pick highlighted and Trade buttons."""
+    with smart pick highlighted and Trade buttons.
+
+    We re-fetch using the LOOSE (honorable) thresholds so any opportunity
+    from either tier survives the round-trip. If the underlying market or
+    forecast has genuinely shifted out of even the loose band, we tell the
+    user with specific numbers, not just "shifted."
+    """
     try:
         target_date = date.fromisoformat(target_date_iso)
     except ValueError:
         return
 
-    opp = await _scan_one(city_key, target_date)
+    # Re-fetch at the LOOSE threshold so honorable-tier opportunities also
+    # round-trip cleanly. (Was the bug: this used strict defaults.)
+    opp = await _scan_one(
+        city_key, target_date,
+        conf_min=OPP_HM_CONF_MIN,
+        market_min=OPP_HM_MARKET_MIN,
+    )
     if not opp:
+        # Genuinely below even the loose band now — give the user the actual
+        # numbers so they can decide for themselves.
+        cfg = SUPPORTED_CITIES.get(city_key)
+        diag_lines = [
+            "ℹ️ *Opportunity no longer above threshold.*",
+            "",
+            f"Re-checked {cfg.display if cfg else city_key} for "
+            f"{target_date.strftime('%b %d')} just now and either:",
+            f"• Model confidence dropped below {int(OPP_HM_CONF_MIN*100)}%, OR",
+            f"• Polymarket YES on the matched bucket dropped below "
+            f"{int(OPP_HM_MARKET_MIN*100)}%, OR",
+            "• The market closed / hasn't been published yet.",
+            "",
+            "_Tap Polymarket below to view the live market manually._",
+        ]
+        kb = []
+        if cfg:
+            kb.append([InlineKeyboardButton(
+                f"🎲 View {cfg.display} markets",
+                callback_data=f"pm:{city_key}",
+            )])
+        kb.append([InlineKeyboardButton(
+            "⬅ All opportunities", callback_data="opp_scan"
+        )])
         await update.effective_message.reply_text(
-            "ℹ️ This opportunity is no longer above the threshold "
-            "(forecast or market may have shifted)."
+            "\n".join(diag_lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(kb),
         )
         return
 
