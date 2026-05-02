@@ -1,156 +1,114 @@
-# Weather Bot — Update v5 (Opportunities + Compact UI)
+# Weather Bot — Update v6 (Looser thresholds + two-tier results)
 
-## What's new
+## What changed
 
-### 🎯 NEW: Opportunities scanner
-A new top-level button and `/opportunities` command. It scans **all 35 cities
-× today + tomorrow** in the cities' local timezones, filters to the trades
-worth your attention, and ranks them.
+**Just `bot.py`.** No `polymarket.py` change, no new dependencies.
 
-**Filters** (both must pass):
-- Our model confidence ≥ 75%
-- The matched bucket has ≥ 40% YES on Polymarket (crowd somewhat agrees)
+### Threshold tuning
+- **Strict tier**: confidence ≥ **70%** AND market YES ≥ **40%** (was 75/40)
+- **Honorable mentions tier**: confidence ≥ **60%** AND market YES ≥ **30%** (new)
 
-**Ranking:** combined score = model confidence × edge × model probability.
-Surfaces the highest-conviction mispricings, not just the obvious consensus.
+### Two-tier display
+The Opportunities view now shows two sections:
+- 🟢 **Strict Picks** — your high-conviction trades, top
+- 🟡 **Honorable Mentions** — looser tier, below the strict section
 
-**Tap any opportunity** to drill in. You see:
-- 💰 Best EV pick (highest expected value per $1 staked)
-- 🎯 Matched bucket (what our model directly predicts)
-- A third runner-up
-- Each with a one-tap **▶ Trade** button straight to Polymarket
-- EV math shown: `model%` vs `market%`, edge in pp, $/$ EV
+### No cap on results
+All qualifying opportunities now appear (was capped at top 5). Each has its
+own Details button, numbered sequentially across both tiers.
 
-### 📐 Compact bar visualization
-Fixes the mobile-readability issue. Was:
-```
-🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜  30% YES  (70% NO)   ← 3 lines per bucket
-```
-Now:
-```
-▰▰▰▱▱▱▱▱▱▱ 54–55°F ✅ · 30%Y 70%N  Trade   ← 1 line per bucket
-```
-
-About 60% less vertical space on phones.
-
-## Files
-
-| File | Status |
-|---|---|
-| `polymarket.py` | Adds `EVPick`, `Opportunity`, `model_yes_prob_for_bucket`, `rank_buckets_by_ev`, `score_opportunity`. Existing functions unchanged. |
-| `bot.py` | Adds `/opportunities` command, scanner, detail view, compact bar, new keyboard button. Existing flows unchanged. |
-
-No new dependencies. No DB migration.
+### Single network pass
+Same speed as before — we scan once at the loose threshold, then classify
+into tiers locally. No extra API calls.
 
 ---
 
-## STEP-BY-STEP DEPLOY
+## DEPLOY — STEP BY STEP
 
-### Part A — On your laptop (5 min)
+### Part A — Laptop (3 min)
 
-**1. Find the zip.**
-   Look for `weather-bot-update-v5.zip` (the file I just gave you).
-   Right-click → "Extract All" / unzip.
+**1. Find this update zip and unzip it.**
+   You'll get one file: `bot.py`. Just one.
 
-**2. Open your local weather-bot repo folder.**
-   This is the folder on your laptop you originally pushed to GitHub. It has
-   `bot.py`, `polymarket.py`, etc. in it.
+**2. Open your local weather-bot repo folder** on your computer.
 
-**3. Copy the two new files in, overwriting the old ones.**
-   From the unzipped `wb-update-v5/` folder, drag `bot.py` and `polymarket.py`
-   into your local repo folder. When asked "Replace existing files?" → **YES**.
-   Don't copy `UPDATE.md` (this file).
+**3. Drag `bot.py`** into your repo folder, replacing the old `bot.py`.
 
-**4. Open GitHub in your browser.** Go to your weather-bot repo.
+**4. Open your weather-bot repo on GitHub** in a browser.
 
 **5. Click "Add file" → "Upload files".**
 
-**6. Drag `bot.py` and `polymarket.py`** from your repo folder into the
-   upload area. GitHub will show a warning that you're replacing files —
-   that's exactly right.
+**6. Drag just `bot.py`** into the upload area. It will say "Replacing existing
+   `bot.py`" — that's correct.
 
-**7. Scroll down**, type a commit message:
-   ```
-   v5: Opportunities scanner + compact bar
-   ```
-   Make sure "Commit directly to the main branch" is selected.
-   Click the green **Commit changes** button.
+**7. Scroll down**, commit message:
+```
+v6: Two-tier opportunities (strict 70/40 + honorable 60/30), no cap
+```
+Make sure "Commit directly to main branch" is selected.
+Click **Commit changes**.
 
-**8. Verify on GitHub:** click `polymarket.py`, search (Ctrl+F) for `EVPick`.
-   If you find it — upload worked.
+### Part B — VPS in PuTTY (1 min)
 
-### Part B — On the VPS in PuTTY (1 min)
-
-**9. Open PuTTY. Connect.**
-
-**10. Get into the right folder.** ⚠️ This is where things broke before.
 ```bash
 cd ~/weather-bot
-pwd
-```
-`pwd` should print `/root/weather-bot`. If it prints something else, you're
-in the wrong folder — re-run `cd ~/weather-bot`.
-
-**11. Pull the new code:**
-```bash
+pwd                                        # confirm /root/weather-bot
 git pull
-```
-You should see lines like `Updating ... Fast-forward ... 2 files changed`.
-- If it says **"Already up to date"** → upload didn't save on GitHub. Go back to step 7.
-- If it asks for **Username** → re-set the token URL:
-  ```bash
-  git remote set-url origin https://<YOUR_TOKEN>@github.com/jameseforrester-ux/weather-bot.git
-  git pull
-  ```
-
-**12. Restart the bot:**
-```bash
 sudo systemctl restart weather-bot
 sleep 3
 sudo systemctl status weather-bot --no-pager
 ```
-You want `Active: active (running)`. Press `q` to exit.
 
-**13. (Optional) Watch live logs while you test:**
-```bash
-sudo journalctl -u weather-bot -f
-```
-Press Ctrl+C when done. Bot keeps running.
+You want `Active: active (running)`. Press `q` to exit.
 
 ### Part C — Test in Telegram
 
-**14.** `/start` — confirm new keyboard shows 🎯 Opportunities
+**1.** Tap 🎯 Opportunities
 
-**15. Tap 🎯 Opportunities** — bot scans 35 markets × 2 days. Takes 5-15
-seconds (35 × 2 forecasts + market fetches in parallel).
+**2.** You should now see two sections:
+```
+🟢 Strict Picks — conf ≥70% · market ≥40%
+1. NYC · Today  🎯 82%
+   55°F → 54–55°F  ▰▰▰▰▱▱▱▱ 45%  edge +17pp
 
-You'll see one of:
-- **A list of top 5** — each has a **📋 Details** button to drill in.
-- **"No high-confidence opportunities right now"** — totally normal mid-day
-  when forecasts are uncertain. Try again in a few hours, or near a market
-  resolution (forecasts firm up).
+🟡 Honorable Mentions — conf ≥60% · market ≥30%
+2. Tokyo · Today  🎯 65%
+   ...
+3. Paris · Tomorrow  🎯 67%
+   ...
+```
 
-**16. Tap a Details button.** You see best EV pick, matched bucket,
-runner-up, with **▶ Trade** buttons that open Polymarket directly.
+If a tier has no qualifying picks, it just shows "_none right now_" instead
+of being missing — so you always know the scan ran.
+
+---
+
+## Why the looser thresholds help
+
+Old (75/40): only ~1-2 cities qualify on a typical day.
+
+New (70/40 strict + 60/30 honorable): typically 3-8 picks across both tiers.
+
+The **honorable tier** is where most of the real value lives. Those are picks
+where either:
+- Our model is confident but the crowd is split (market YES 30-40% on our pick) — **the crowd may be missing what 8 NWP models agree on**, OR
+- Our confidence is 60-70% (still meaningful) but slightly noisier — **still usable, just position-size accordingly**
+
+You should treat strict picks as "size up" and honorable mentions as
+"size down but still consider".
 
 ---
 
 ## Troubleshooting
 
-**Bot fails to start after pull:**
+**Still only seeing NYC after this update:** That genuinely means most other
+cities don't have markets published yet, OR they're in volatile weather. Run
+in PuTTY to confirm:
 ```bash
-sudo journalctl -u weather-bot -n 30 --no-pager
+sudo journalctl -u weather-bot -n 200 --no-pager | grep polymarket
 ```
-Paste the last 20 lines if it doesn't start.
+Look for `no event for X/Y` lines vs `→ N buckets` lines. If most are
+"no event", Polymarket hasn't listed those cities yet.
 
-**Scan takes forever / times out:**
-This is rare but possible if Polymarket's API is slow. The bot will time out
-gracefully after ~30s. Try `/opportunities` again.
-
-**Empty results all the time:**
-Could legitimately mean no markets currently meet the threshold. To verify
-the scanner is working:
-- Run `/polymarket` → pick NYC → see if today's markets are listed.
-- If yes, the scanner works; the threshold just isn't met right now.
-- If no markets show for any city, check Polymarket's website — they may
-  not have published today's markets yet (usually they're up by 9am ET).
+**Both tiers empty:** Polymarket's daily markets typically go live around
+9 AM ET. If you're checking before then, most cities won't have markets yet.

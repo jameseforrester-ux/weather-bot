@@ -13,7 +13,7 @@ import asyncio
 import logging
 import re
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from telegram import (
     BotCommand,
@@ -514,15 +514,18 @@ async def send_polymarket_forecast(update: Update, city_key: str) -> None:
 
 
 # ─────────────────────────── Opportunities scanner ────────────────────────
-# Min model confidence to be considered an "opportunity"
-OPP_CONF_MIN = 0.75
-# Min Polymarket YES on the model's matched bucket — ensures the crowd at
-# least somewhat agrees, avoiding lottery-ticket positions
+# Strict tier — high-conviction picks shown at the top
+OPP_CONF_MIN = 0.70
 OPP_MARKET_MIN = 0.40
+# Honorable mentions tier — looser fallback always shown below strict
+OPP_HM_CONF_MIN = 0.60
+OPP_HM_MARKET_MIN = 0.30
 
 
 async def _scan_one(
-    city_key: str, target_date: date
+    city_key: str, target_date: date,
+    conf_min: float = OPP_CONF_MIN,
+    market_min: float = OPP_MARKET_MIN,
 ) -> Optional[Opportunity]:
     """Build a single (city, date) opportunity if it clears the thresholds.
     Returns None if anything is missing or below threshold."""
@@ -537,11 +540,10 @@ async def _scan_one(
         return None
     if not forecasts:
         return None
-    # Find the forecast matching target_date
     fc = next((f for f in forecasts if f.date == target_date), None)
     if fc is None:
         return None
-    if fc.confidence < OPP_CONF_MIN:
+    if fc.confidence < conf_min:
         return None
 
     market = await get_market_for_city(city_key, target_date)
@@ -550,10 +552,9 @@ async def _scan_one(
 
     pred = fc.predicted_max_c if market.unit == "C" else fc.predicted_max_f
     matched = match_for_prediction(market, pred)
-    if not matched or matched.yes_prob < OPP_MARKET_MIN:
+    if not matched or matched.yes_prob < market_min:
         return None
 
-    # Rank buckets by EV using sigma in the market's unit
     sigma = fc.std_c if market.unit == "C" else fc.std_c * 9 / 5
     ranked = rank_buckets_by_ev(market, float(pred), sigma)
     if not ranked:
@@ -574,21 +575,38 @@ async def _scan_one(
     )
 
 
-async def find_top_opportunities(top_n: int = 5) -> List[Opportunity]:
-    """Scan all 35 cities for today + tomorrow (each city's local), filter,
-    sort by combined score, return top N."""
+async def find_opportunities_two_tier() -> Tuple[List[Opportunity], List[Opportunity]]:
+    """Scan all cities for today + tomorrow (city-local) and split into:
+      - strict: confidence ≥ OPP_CONF_MIN AND market YES ≥ OPP_MARKET_MIN
+      - honorable: passed honorable filter but not strict
+    Both lists are sorted by combined score, no caps. Single network pass
+    using the honorable thresholds; we classify into tiers after.
+    """
     tasks = []
     for city_key in SUPPORTED_CITIES:
         local_today = city_local_today(city_key)
         if local_today is None:
             continue
-        tasks.append(_scan_one(city_key, local_today))
-        tasks.append(_scan_one(city_key, local_today + timedelta(days=1)))
+        for d in (local_today, local_today + timedelta(days=1)):
+            tasks.append(_scan_one(
+                city_key, d,
+                conf_min=OPP_HM_CONF_MIN,
+                market_min=OPP_HM_MARKET_MIN,
+            ))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    opps = [r for r in results if isinstance(r, Opportunity)]
-    opps.sort(key=lambda o: -o.score)
-    return opps[:top_n]
+    all_opps = [r for r in results if isinstance(r, Opportunity)]
+
+    strict = [o for o in all_opps
+              if o.confidence >= OPP_CONF_MIN
+              and o.matched_yes >= OPP_MARKET_MIN]
+    strict_keys = {(o.city_key, o.target_date) for o in strict}
+    honorable = [o for o in all_opps
+                 if (o.city_key, o.target_date) not in strict_keys]
+
+    strict.sort(key=lambda o: -o.score)
+    honorable.sort(key=lambda o: -o.score)
+    return strict, honorable
 
 
 def _format_opportunity_summary(opp: Opportunity, idx: int) -> str:
@@ -606,41 +624,72 @@ def _format_opportunity_summary(opp: Opportunity, idx: int) -> str:
 
 async def cmd_opportunities(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = await update.effective_message.reply_text(
-        "🎯 *Scanning 35 markets…*\n_today + tomorrow, each city's local time_",
+        f"🎯 *Scanning {len(SUPPORTED_CITIES)} markets…*\n"
+        "_today + tomorrow, each city's local time_",
         parse_mode=ParseMode.MARKDOWN,
     )
     try:
-        opps = await find_top_opportunities(top_n=5)
+        strict, honorable = await find_opportunities_two_tier()
     except Exception as e:
         log.exception("opportunity scan failed")
         await msg.edit_text(f"❌ Scan failed: {e}")
         return
 
-    if not opps:
+    if not strict and not honorable:
         await msg.edit_text(
-            "🎯 *No high-confidence opportunities right now*\n\n"
-            f"No (city, day) combo cleared confidence ≥{int(OPP_CONF_MIN*100)}% "
-            f"AND market YES ≥{int(OPP_MARKET_MIN*100)}% on our matched bucket. "
-            "Try again later — opportunities appear as forecasts firm up "
-            "closer to resolution.",
+            "🎯 *No opportunities right now*\n\n"
+            f"No (city, day) cleared even the loose filter "
+            f"(conf ≥{int(OPP_HM_CONF_MIN*100)}% AND market YES "
+            f"≥{int(OPP_HM_MARKET_MIN*100)}%).\n\n"
+            "Most likely Polymarket hasn't published today's markets for many "
+            "cities yet — check back in a few hours.",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Rescan", callback_data="opp_scan")]]
+            ),
         )
         return
 
-    lines = [
-        "🎯 *Top High-Confidence Opportunities*",
-        f"_Conf ≥{int(OPP_CONF_MIN*100)}% · Crowd YES ≥{int(OPP_MARKET_MIN*100)}% · "
-        "Sorted by edge × confidence_",
-        "",
-    ]
-    keyboard = []
-    for i, opp in enumerate(opps, 1):
-        lines.append(_format_opportunity_summary(opp, i))
-        # Each opportunity gets a "Details" button that pulls up its EV picks
-        keyboard.append([InlineKeyboardButton(
-            f"📋 #{i}: {opp.city_display} {('Today' if opp.is_today else 'Tom')}",
-            callback_data=f"opp:{opp.city_key}:{opp.target_date.isoformat()}",
-        )])
+    lines: List[str] = []
+    keyboard: List[List[InlineKeyboardButton]] = []
+    counter = 0
+
+    if strict:
+        lines.append(
+            f"🟢 *Strict Picks* — conf ≥{int(OPP_CONF_MIN*100)}% · "
+            f"market ≥{int(OPP_MARKET_MIN*100)}%"
+        )
+        lines.append("")
+        for opp in strict:
+            counter += 1
+            lines.append(_format_opportunity_summary(opp, counter))
+            keyboard.append([InlineKeyboardButton(
+                f"📋 #{counter}: {opp.city_display} "
+                f"{('Today' if opp.is_today else 'Tom')}",
+                callback_data=f"opp:{opp.city_key}:{opp.target_date.isoformat()}",
+            )])
+    else:
+        lines.append("🟢 *Strict Picks* — _none right now_")
+        lines.append("")
+
+    if honorable:
+        lines.append("")
+        lines.append(
+            f"🟡 *Honorable Mentions* — conf ≥{int(OPP_HM_CONF_MIN*100)}% · "
+            f"market ≥{int(OPP_HM_MARKET_MIN*100)}%"
+        )
+        lines.append("")
+        for opp in honorable:
+            counter += 1
+            lines.append(_format_opportunity_summary(opp, counter))
+            keyboard.append([InlineKeyboardButton(
+                f"📋 #{counter}: {opp.city_display} "
+                f"{('Today' if opp.is_today else 'Tom')}",
+                callback_data=f"opp:{opp.city_key}:{opp.target_date.isoformat()}",
+            )])
+
+    lines.append("")
+    lines.append("_Sorted by edge × confidence within each tier._")
     keyboard.append([InlineKeyboardButton("🔄 Rescan", callback_data="opp_scan")])
 
     await msg.edit_text(
