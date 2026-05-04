@@ -25,6 +25,20 @@ from typing import Dict, List, Optional
 
 import httpx
 
+async def fetch_owm_data(lat, lon, api_key):
+    if not api_key:
+        return None
+    url = f"https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&appid={api_key}&units=metric&exclude=minutely,hourly,alerts"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data['daily'][0]['temp']['max']
+                return None
+    except Exception:
+        return None
+
 OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast"
 AVIATION_WX_METAR = "https://aviationweather.gov/api/data/metar"
 
